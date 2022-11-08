@@ -1,0 +1,961 @@
+#include <Wire.h>
+#include <avr/wdt.h>
+//define leds
+#define LEDS_OFF  B00000000 
+#define LED_1     B10000000 
+#define LED_2     B01000000 
+#define LED_3     B00100000 
+#define LED_4     B00010000 
+#define LED_5     B00001000 
+#define LED_6     B00000100
+#define LED_t     B11100001
+#define LED_U     B01110101
+#define LED_F     B11000011
+#define LED_r     B01100000
+#define LED_l     B11000000
+#define LED_b     B11110001
+#define LED_L     B01100001
+#define LED_E     B11100011
+#define LED_P1    B00010100
+#define LED_P2    B11100110
+#define LED_P     B11000111
+
+#define LED 13 /* builtin LED indicating when we are a master */
+#define OUT A1 /* Our OUT line */
+#define OtherMASTER  A2
+/* Bus arbitrator FSM states */
+#define NoMasterNoTrigger 1     //idle state
+#define AttemptToBeMaster 2     //we will attempt to claim master
+#define TriggerIamMaster 3      //we are master after a successful claim
+#define TriggerCollision 4      //both micro-controllers are masters, i.e. a collision
+/* Bus arbitrator variables */
+char busArbState;
+bool trigger;
+char result;
+unsigned char priority;
+short RGBLED;
+short traffic;
+int set;
+bool othermaster() {
+  return(digitalRead(OtherMASTER)!=LOW);
+}
+
+byte cmd = 0x00;
+bool init_module0_clock;// module0 is my 0 to F button counter
+bool init_module1_clock;// module1 is my button 1 debouncer and driver
+byte init_module2_clock;// module2 is my traffic light controller
+bool init_module7_clock;//module7 variables. It is used as a test bench for the bus arbitrator
+bool init_module6_clock;// module6 is the heart beat module
+byte init_module8_clock;//maintenance mode
+byte init_module9_clock;
+byte init_module10_clock;
+byte init_module11_clock;
+byte init_module12_clock;
+byte init_module13_clock;
+byte init_module15_clock;// module15 is my scheduler
+
+// define all pins and 7 seg display images
+const byte numbers[16] =  //
+  {
+  B01110111, //0
+  B00010100, //1
+  B11100110, //2
+  B10110110, //3
+  B10010101, //4
+  B10110011, //5
+  B11110011, //6
+  B00010110, //7
+  B11110111, //8
+  B10010111, //9
+  B11010111, //A
+  B11110001, //B
+  B01100011, //C
+  B11110100, //D
+  B11100011, //E
+  B11000011, //F
+  };
+  // define yourself some debounce constants in ms
+#define debounce 300 //normal debounce duration
+#define short_debounce 50 //short debounce duration
+// declare the state variable of the 7 segment display
+unsigned char ledState; 
+//latch
+#define latch_bit     B00000001
+#define latch_high    PORTC |= latch_bit
+#define latch_low     PORTC &= ~latch_bit
+//data
+#define data_bit      B00010000
+#define data_high     PORTB |= data_bit
+#define data_low      PORTB &= ~data_bit
+//clock
+#define clock_bit     B00001000
+#define clock_high    PORTC |= clock_bit
+#define clock_low     PORTC &= ~clock_bit      
+
+// definition for the type of the button state variables
+enum button_t { notPRESSED, partialPRESS, normalPRESS, heldPRESS,
+                preDblClick, partialDblClick, DblClick, afterDblClick };
+button_t B1_state; // button B1 state variable
+button_t B2_state; // button B2 state variable
+
+#define notPRESSED 0
+#define normalPRESS 1
+#define partialPRESS 2
+
+#define B1_BIT B00000010
+#define B1_PRESSED      !(PIND & B1_BIT)
+#define B1_RELEASED     !B1_PRESSED
+//#define B1_partialPRESS !B1_normalPRESS
+
+#define B2_BIT B00000001
+#define B2_PRESSED      !(PIND & B2_BIT)
+#define B2_RELEASED     !B2_PRESSED
+//#define B2_partialPRESS !B2_normalPRESS
+
+void setup() {
+  
+  Wire.begin(8); /* join i2c bus with address 8 */
+  Wire.onReceive(receiveEvent); /* register receive event */
+  Wire.onRequest(requestEvent); /* register request event */
+  Serial.begin(115200); /* start serial for debug */
+  pinMode(9, OUTPUT);//blue
+  pinMode(10, OUTPUT);//green
+  pinMode(11, OUTPUT);//red
+  init_module0_clock = true;
+  init_module1_clock = true;
+  init_module2_clock = true;
+//  init_module3_clock = true;
+//  init_module4_clock = true;
+//  init_module5_clock = true;
+  init_module6_clock = true;
+//  init_module7_clock = true;
+//  init_module8_clock = true;
+  init_module9_clock = true;
+  init_module10_clock = true;//red
+  init_module11_clock = true;//green
+  init_module12_clock = true;//blue
+  init_module13_clock = true;//
+  init_module15_clock = true;//scheduler
+
+// DATA, CLOCK and LATCH pin for the shift register
+  // to be configured as outputs using bare-metal approach
+  DDRB |= B00010000;
+  DDRC |= B00001001;
+  // set clock and latch pin to LOW using bare-metal approach
+  //PORTB &= ~latch_bit;
+  //PORTB &= ~clock_bit;
+  latch_low;
+  clock_low;
+  
+  // set the state variable for your
+  // 7 seg display to "all_segments_off"
+  ledState = B00000000;
+
+  // button 1 and 2 pins to be configured as INPUT_PULLUP
+  // again using a bare metal approach.
+ DDRB &= ~B1_BIT; // pullup for s1
+ PORTB |= B1_BIT; 
+
+ DDRB &= ~B2_BIT; //pullup for s2
+ PORTB |= B2_BIT; 
+  // set the state variables for both
+  // buttons to "not pressed"
+  B1_state=notPRESSED;
+  B2_state=notPRESSED;
+  // all traffic light led pins to be configured
+  // as outputs and to be turned off using bare-metal.
+  DDRD |= B11111100; 
+  
+}
+
+
+
+
+
+void loop() {
+
+    { // module 1 - Switch 1 debounce
+    static unsigned long module_time, module_delay;
+    static unsigned long debounce_count;
+    static bool module_doStep;
+    static unsigned char state; // state variable for module 1
+    
+    if (init_module1_clock) {
+      module_delay = 17;
+      module_time=millis();
+      module_doStep=false;
+      init_module1_clock=false;
+      state=0;
+    }
+    else {
+      unsigned long m;
+      m=millis();
+      if (((long)(m - module_time)) > module_delay) {
+        module_time = m; module_doStep = true;
+      }
+      else module_doStep = false;
+    }
+
+    if (module_doStep) {
+      switch(state){
+          case 0: 
+            B1_state=notPRESSED;
+            debounce_count = module_time;
+            if (B1_RELEASED) state = 0;
+            else state = 1;
+            break;
+          case 1: 
+            B1_state=partialPRESS;
+            if (B1_RELEASED) state = 0;
+            else if ((long)(millis()-debounce_count) >= debounce) state = 2;
+            else state = 1;
+            break;
+          case 2: 
+            B1_state=normalPRESS;
+            if (B1_RELEASED) state = 0;
+            else if ((long)(millis()-debounce_count) >= 1000) state = 2;
+            else state = 2;
+            break;
+          // ... etc
+          default: state = 0; break;
+        }
+    }
+  }
+
+
+    { // module 2 - traffic lights
+    static unsigned long module_time, module_delay;
+    static bool module_doStep;
+    static unsigned char state; // state variable for module 2
+    
+    if (init_module2_clock) {
+      module_delay = 500;
+      module_time=millis();
+      module_doStep=false;
+      init_module2_clock=false;
+      state= 10;
+      
+    }
+    else {
+      unsigned long m;
+      m=millis();
+      if (((long)(m - module_time)) > module_delay) {
+        module_time = m; module_doStep = true;
+      }
+      else module_doStep = false;
+    }
+
+    if (module_doStep) {
+      switch(state){
+          case 10: // attention
+          PORTD = (LED_2 | LED_5)  | (B00000011 & PIND);
+          module_delay = 3000;
+          state = 0;
+            //... etc
+            break;
+          case 0: // =red ||red
+            //... etc
+            PORTD = (LED_1 | LED_4)  | (B00000011 & PIND);
+          module_delay = 1000;
+          state = 1;
+            break;
+          case 1: // =red, yellow || red
+          PORTD = (LED_1 | LED_2 | LED_4 )  | (B00000011 & PIND);
+          module_delay = 1000;
+          state = 2;
+            //... etc
+            break;
+          case 2: // =green || red
+           PORTD = (LED_3 | LED_4  )  | (B00000011 & PIND);
+          if (priority = 0)
+          module_delay = 5000;
+          else if (priority = 1)
+           module_delay = 7000;
+          else if (priority = 2)
+           module_delay = 3000;
+          state = 3;       
+            //... etc
+            break;
+          case 3: // =yellow || red
+           PORTD = (LED_2 | LED_4 )  | (B00000011 & PIND);
+          module_delay = 1000;
+          state = 4;
+            //... etc
+            break;
+          case 4: // =red ||red
+           PORTD = (LED_1 | LED_4 )  | (B00000011 & PIND);
+          module_delay = 1000;
+          state = 5;
+            //... etc
+            break;
+          case 5: // =red || red, yellow
+           PORTD = (LED_1 | LED_4 | LED_5 )  | (B00000011 & PIND);
+          module_delay = 1000;
+          state = 6;
+            //... etc
+            break;
+          case 6: // =red || green
+           PORTD = (LED_1 | LED_6 )  | (B00000011 & PIND);
+          if (priority = 0)
+          module_delay = 5000;
+          else if (priority = 2)
+           module_delay = 7000;
+          else if (priority = 1)
+           module_delay = 3000;
+                
+          state = 7;
+            //... etc
+            break;
+          case 7: // =red || yellow
+           PORTD = (LED_1 | LED_5)  | (B00000011 & PIND);
+          module_delay = 1000;
+          state = 0;
+            //... etc
+            break;
+          default:state = 10;break;
+        }
+        
+    }
+  }
+
+{ // module 6 - Heartbeat
+    static unsigned long module_time, module_delay;
+    static bool module_doStep;
+    static unsigned char state; // state variable for module 1
+
+    if (init_module6_clock) {
+      module_delay = 320;
+      module_time=millis();
+      module_doStep=false;
+      init_module6_clock=false;
+      state=0;
+    }
+    else {
+      unsigned long m;
+      m=millis();
+      if (((long)(m - module_time)) > module_delay) {
+        module_time = m; module_doStep = true;
+      }
+      else module_doStep = false;
+    }
+
+    if (module_doStep) {
+      unsigned char msb = 0b11110111 & ledState;
+       switch (state) {
+        case 0: 
+          // single line of code here
+          ledState = msb | B00001000;
+          state = 1;
+          break;
+        case 1:
+          // single line of code here
+          ledState = msb; 
+          state=0;
+          break;
+        default: state=0;
+       } 
+    }
+  }
+
+
+  { // Maintenance Mode module- 8
+
+ static unsigned long module_time, module_delay;
+    static bool module_doStep;
+    static unsigned char state; // state variable for module 2
+    
+    if (init_module8_clock) {
+      module_delay = 500;
+      module_time=millis();
+      module_doStep=false;
+      init_module8_clock=false;
+      state= 0;
+    }
+    else {
+      unsigned long m;
+      m=millis();
+      if (((long)(m - module_time)) > module_delay) {
+        module_time = m; module_doStep = true;
+      }
+      else module_doStep = false;
+    }
+
+    if (module_doStep) {
+      switch(state){
+          case 0: // attention
+          PORTD = (LED_2 | LED_5)  | (B00000011 & PIND);
+          module_delay = 500;
+          state = 1;
+            
+            break;
+          case 1: // =red ||red
+            //... etc
+            PORTD = (B00000011 & PIND);
+          module_delay = 500;
+          state = 0;
+            break;
+          default:state = 0;
+          break;
+  
+}
+    }
+}
+
+  { // module 9 - pelican
+    static unsigned long module_time, module_delay;
+    static bool module_doStep;
+    static unsigned char state, check, ret, tim; // state variable for module 2
+    static unsigned int flash;
+    if (init_module9_clock) {
+      module_delay = 50;
+      module_time=millis();
+      module_doStep=false;
+      init_module9_clock=false;
+      state=ret=0;
+    }
+    else {
+      unsigned long m;
+      m=millis();
+      if (((long)(m - module_time)) > module_delay) {
+        module_time = m; module_doStep = true;
+      }
+      else module_doStep = false;
+    }
+
+    if (module_doStep) {
+      switch(state){
+          
+           case 0: // =red ||red
+           
+           PORTD = (LED_1 | LED_4)  | (B00000011 & PIND);
+          tim= tim + 1;
+          if (tim == 20){
+          state = 1;
+          check=0;
+          tim = 0;}
+            break;
+          case 1: // =red, yellow || red
+         
+          PORTD = (LED_1 | LED_2 | LED_4)  | (B00000011 & PIND);
+          tim= tim + 1;
+          if (tim == 40){
+          state = 2;
+          tim = 0; }
+            
+            break;
+          case 2: // =green || red
+         
+          PORTD = (LED_3 | LED_4  )  | (B00000011 & PIND);
+          tim= tim + 1;
+          if (tim >= 160){
+                 
+          if (check >= 1)
+          {tim = 0;
+          state = 3;}
+          else 
+          state = 2;}       
+            //... etc
+            break;
+          case 3: // =yellow || red
+          
+           PORTD = (LED_2 | LED_4 )  | (B00000011 & PIND);
+          tim= tim + 1;
+          if (tim == 40){
+          state = 4;
+          tim = 0;}
+          
+            //... etc
+            break;
+          case 4: // =red ||red
+          
+           PORTD = (LED_1 | LED_4 )  | (B00000011 & PIND);
+         tim= tim + 1;
+          if (tim == 20){
+          state = 5;
+          tim = 0;}
+            //... etc
+            break;
+       
+          case 5: // =red || green
+          
+           PORTD = (LED_1 | LED_6 )  | (B00000011 & PIND);
+           tim= tim + 1;
+          if (tim == 80){
+          state = 6;
+          tim = 0;
+          check = 0;}
+            //... etc
+            break;
+          case 6: // flashing yellow, green
+         
+          PORTD = (LED_2 | LED_6)  | (B00000011 & PIND);
+          tim= tim + 1;
+           if (tim == 10){
+          flash = flash + 1;
+          if ( flash == 4){
+          state = 8;
+          flash=0;
+          tim = 0;}
+          else{
+            tim=0;
+            state=7;}
+            }
+            //... etc
+            break;
+            
+            case 7: // flashing yellow, green
+           PORTD =  (B00000011 & PIND);
+          tim= tim + 1;
+          if (tim == 10){
+          state = 6;
+          tim = 0;
+          }
+          
+            //... etc
+            break;
+            case 8: // flashing yellow, green
+            
+           PORTD = (LED_2 | LED_4)  | (B00000011 & PIND);
+          tim= tim + 1;
+          if (tim == 10){
+          flash = flash + 1;
+          if ( flash == 3){
+          state = 2;
+          flash=0;
+          tim = 0;}
+          else{
+            tim=0;
+            state=9;}
+            }
+          
+            
+            break;
+            case 9: // flashing yellow, green
+            
+           PORTD = ( LED_4)  | (B00000011 & PIND);
+           tim= tim + 1;
+          if (tim == 10){
+          state = 8;
+          tim = 0;
+          }
+          
+            //... etc
+            break;
+            
+            //... etc
+            break;
+          default:state = 0;break;
+       }
+        switch (ret) {
+        case 0: 
+          if (B1_state==normalPRESS) {
+            ret=1;
+            check=(check+1);
+            
+          }
+          break;
+        case 1:
+          if (B1_state==notPRESSED) {
+            ret=0;
+          }
+          break;
+        default: ret=0;
+       }
+    }
+  }
+  
+  { // module 10 - Red LED
+    static unsigned long module_time, module_delay, module_timestamp;
+    static bool module_doStep;
+    static unsigned char state; // state variable for module 3
+    static unsigned char intensity = 0;
+    static unsigned char delta = 5;
+
+      /* test bench */
+      if (init_module10_clock) {
+        module_delay = 30; 
+        module_time=millis();
+        module_doStep=false;
+        init_module10_clock=false;
+        state=0;    
+        analogWrite(11, 0);   // OFF
+      }   
+      else {
+        unsigned long m;
+        m=millis();
+        if ((/* make this roll-over safe! */ (long)m - module_time > module_delay)) {
+          module_time = m; module_doStep = true;
+        }
+        else module_doStep = false;
+      }
+  
+      if (module_doStep) {  
+        switch(state)
+        {
+        case 0:
+          analogWrite(11, intensity);
+          intensity = intensity + delta;
+          if (intensity >250)
+          {
+            state = 0;
+            delta = -5;
+          }
+          break;
+        case 1:
+          analogWrite(11, intensity);
+          intensity = intensity + delta;
+          if (intensity < 5)
+          {
+            state = 1;
+            delta = 5;
+          }
+
+          break;
+        }
+      }
+  }
+
+  { // module 11 - Green LED
+    static unsigned long module_time, module_delay, module_timestamp;
+    static bool          module_doStep;
+    static unsigned char state; // state variable for module 3
+    static unsigned char intensity = 0;
+    static unsigned char delta = 5;
+
+      /* test bench */
+      if (init_module11_clock) {
+        module_delay = 30; 
+        module_time=millis();
+        module_doStep=false;
+        init_module11_clock=false;
+        state=0;    
+        analogWrite(10, 0);   // OFF
+      }   
+      else {
+        unsigned long m;
+        m=millis();
+        if ((/* make this roll-over safe! */ (long)m - module_time > module_delay)) {
+          module_time = m; module_doStep = true;
+        }
+        else module_doStep = false;
+      }
+  
+      if (module_doStep) {  
+        switch(state)
+        {
+        case 0:
+          analogWrite(10, intensity);
+          intensity = intensity + delta;
+          if (intensity > 250)
+          {
+            state = 0;
+            delta = -5;
+          }
+          break;
+        case 1:
+          analogWrite(10, intensity);
+          intensity = intensity + delta;
+          if (intensity < 5)
+          {
+            state = 1;
+            delta = 5;
+          }
+
+          break;
+        }
+      }
+  }
+
+ { // module 12 - Blue LED
+    static unsigned long module_time, module_delay, module_timestamp;
+    static bool module_doStep;
+    static unsigned char state; // state variable for module 3
+    static unsigned char intensity = 0;
+    static unsigned char delta = 5;
+
+      /* test bench */
+      if (init_module12_clock) {
+        module_delay = 30; 
+        module_time=millis();
+        module_doStep=false;
+        init_module12_clock=false;
+        
+        state=0;    
+        analogWrite(9, 0);   // OFF
+      }   
+      else {
+        unsigned long m;
+        m=millis();
+        if ((/* make this roll-over safe! */ (long)m - module_time > module_delay)) {
+          module_time = m; module_doStep = true;
+        }
+        else module_doStep = false;
+      }
+  
+      if (module_doStep) {  
+        switch(state)
+        {
+        case 0:
+          analogWrite(9, intensity);
+          intensity = intensity + delta;
+          if (intensity > 250)
+          {
+            state = 0;
+            delta = -5;
+          }
+          break;
+        case 1:
+          analogWrite(9, intensity);
+          intensity = intensity + delta;
+          if (intensity < 5)
+          {
+            state = 1;
+            delta = 5;
+          }
+
+          break;
+        }
+      }
+  }
+  { // module 13 - amber LED
+    static unsigned long module_time, module_delay, module_timestamp;
+    static bool module_doStep;
+    static unsigned char state; // state variable for module 3
+    static unsigned char intensity = 0;
+    static unsigned char delta = 5;
+
+      /* test bench */
+      if (init_module13_clock) {
+        module_delay = 30; 
+        module_time=millis();
+        module_doStep=false;
+        init_module13_clock=false;
+        
+        state=0;    
+        analogWrite(9, 0);   // OFF
+      }   
+      else {
+        unsigned long m;
+        m=millis();
+        if ((/* make this roll-over safe! */ (long)m - module_time > module_delay)) {
+          module_time = m; module_doStep = true;
+        }
+        else module_doStep = false;
+      }
+  
+      if (module_doStep) {  
+        switch(state)
+        {
+        case 0:
+          analogWrite(9, intensity);
+          intensity = intensity + delta;
+          if (intensity > 250)
+          {
+            state = 0;
+            delta = -5;
+          }
+          break;
+        case 1:
+          analogWrite(9, intensity);
+          intensity = intensity + delta;
+          if (intensity < 5)
+          {
+            state = 1;
+            delta = 5;
+          }
+
+          break;
+        }
+      }
+  }
+  
+
+  { // module 15 - LED Scheduler
+    static unsigned long module_time, module_delay, module_timestamp;
+    static bool module_doStep;
+    static unsigned char state; // state variable for module 3
+
+      /* test bench */
+      if (init_module15_clock) {
+        module_delay = 1; 
+        module_time=millis();
+        module_doStep=false;
+        init_module15_clock=false;
+        state=0;    
+      }   
+      else {
+        unsigned long m;
+        m=millis();
+        if ((/* make this roll-over safe! */ (long)m - module_time > module_delay)) {
+          module_time = m; module_doStep = true;
+        }
+        else module_doStep = false;
+      }
+  
+      if (module_doStep) {  
+        switch(RGBLED)
+        {  
+        case 0x66:
+          ledState = (((unsigned char) (B00001000 & ledState)));
+          init_module10_clock = true; //init_module10_clock = true;
+          init_module11_clock = true; //init_module11_clock = true;
+          init_module12_clock = true; //init_module11_clock = true;
+          init_module13_clock = true;//init_module11_clock = true; 
+          break; 
+          
+        case 0x68: //red
+          ledState = (((unsigned char) (B00001000 & ledState)));
+          init_module10_clock = false; //init_module11_clock = true;
+          init_module11_clock = true;  //init_module11_clock = true;
+          init_module12_clock = true;
+          init_module13_clock = true;
+           
+          break;
+        case 0x69://green
+          
+          ledState = (((unsigned char) (B00001000 & ledState)));
+          init_module10_clock = true;  //init_module11_clock = true;
+          init_module11_clock = false; //init_module11_clock = true;
+          init_module12_clock = true;  //init_module12_clock = true;
+          init_module13_clock = true; //init_module13_clock = true;
+            break;
+        case 0x6A://blue
+          
+          ledState = (((unsigned char) (B00001000 & ledState)));
+          init_module10_clock = true;  //init_module11_clock = true;
+          init_module11_clock = true; //init_module11_clock = true;
+          init_module12_clock = false;  //init_module12_clock = true;
+          init_module13_clock = true; //init_module13_clock = true;
+           break;
+        case 0x67://amber
+          ledState = (((unsigned char) (B00001000 & ledState)));        
+          init_module10_clock = true;  //init_module11_clock = true;
+          init_module11_clock = true; //init_module11_clock = true;
+          init_module12_clock = true;  //init_module12_clock = true;
+          init_module13_clock = false; //init_module13_clock = true;                               
+         
+         break;  
+         default:
+          RGBLED = 0x66;
+        }
+      switch(traffic){
+
+                                      
+          
+         case 0x61://equal
+          init_module2_clock = false;// traffic lights
+          ledState = (((unsigned char) (B00001000 & ledState))) | LED_E;
+          init_module8_clock = true;//Maintenance
+          init_module9_clock = true;//Pelican
+          break; 
+         
+         case 0x62://set1
+          init_module2_clock = false;
+          priority = 1;// traffic lights
+          ledState = (((unsigned char) (B00001000 & ledState))) | LED_P1;
+          init_module8_clock = true;//Maintenance
+          init_module9_clock = true;//Pelican 
+          break; 
+          
+         case 0x63://set2
+          init_module2_clock = false;
+          priority = 2;// traffic lights
+          ledState = (((unsigned char) (B00001000 & ledState))) | LED_P2;
+          init_module8_clock = true;//Maintenance
+          init_module9_clock = true;//Pelican
+ 
+          break;
+         case 0x65://pelican
+          init_module2_clock = true;
+          init_module8_clock = true;//Maintenance
+          init_module9_clock = false;//Pelican
+          ledState = (((unsigned char) (B00001000 & ledState))) | LED_P; 
+          break;  
+        case 0x64://Maintenance
+          init_module2_clock = true;
+          init_module8_clock = false;//Maintenance
+          ledState = (((unsigned char) (B00001000 & ledState))) | LED_t;
+          init_module9_clock = true;//Pelican
+          break;  
+         default:         
+          traffic = 0x61;
+      
+              
+                
+        }
+      }
+
+  }
+  shiftByteMSF(ledState);
+}
+
+// function that executes whenever data is received from master
+void receiveEvent(int howMany) {
+  while (0 < Wire.available()) {
+    short c = Wire.read(); /* receive byte as a character */
+    Serial.print(c); /* print the character */
+    cmd = c;
+  }
+  Serial.println(); /* to newline */
+  if(cmd==0x66|| cmd==0x67||cmd==0x68||cmd==0x69||cmd==0x6A)RGBLED=cmd;
+  if(cmd==0x61|| cmd==0x62||cmd==0x63||cmd==0x64||cmd==0x65)traffic=cmd;
+  if(cmd==0x6B){
+    wdt_disable();
+    wdt_enable(WDTO_15MS);
+    while(1);}
+  
+  Serial.println(cmd, HEX);
+  Serial.println(RGBLED, HEX);
+}
+
+
+// function that executes whenever data is requested from master
+void requestEvent() {
+ Wire.write('A');
+ if (traffic == 0x61)Wire.write(0x81);
+ else if (traffic == 0x63)Wire.write(0x83);
+ else if (traffic == 0x64)Wire.write(0x84);
+ else if (traffic == 0x65)Wire.write(0x85);
+ else if (traffic == 0x62)Wire.write(0x82);
+
+
+ 
+ if (RGBLED == 0x66)Wire.write(0x4F);
+ else if (RGBLED == 0x67)Wire.write(0x41);
+ else if (RGBLED == 0x68)Wire.write(0x52);
+ else if (RGBLED == 0x69)Wire.write(0x47);
+ else if (RGBLED == 0x6A)Wire.write(0x42);
+}
+
+void shiftBit(bool data) {
+}
+
+void toggleClock() {
+  clock_high;
+  clock_low;
+}
+
+void toggleLatch() {
+  latch_high;
+  latch_low;
+}
+
+void shiftByteMSF(unsigned char b) {
+    latch_low; // latchPin LOW 
+ 
+    for (int k=0; k <= 7; k++)
+    {
+ 
+      if ( b & (1 << k) )
+      {
+        data_high; // turn On
+      }
+      else
+      {
+        data_low; // turn Off
+      }
+      toggleClock();
+    }
+
+    toggleLatch();
+} 

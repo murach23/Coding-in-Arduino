@@ -1,0 +1,5 @@
+In this project I developed code and build the electronic circuit. 
+Main functionalities of the code are:
+1. Display current posistion of the breadboard. 
+In order to get a position the accelerometer has been used.
+2. Turning off/on LEDs to imitate traffic lights. 

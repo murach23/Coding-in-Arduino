@@ -1,0 +1,628 @@
+#include <Wire.h>
+
+// define your MPU-6050 address here
+#define MPU-6050 0x68
+#define MPU_addr 0x68
+
+//define leds
+#define LEDS_OFF  B00000000 
+#define LED_1     B10000000 
+#define LED_2     B01000000 
+#define LED_3     B00100000 
+#define LED_4     B00010000 
+#define LED_5     B00001000 
+#define LED_6     B00000100
+
+#define LED_t     B11100001
+
+// define all pins and 7 seg display images
+const byte numbers[16] =  //
+  {
+  B01110111, //0
+  B00010100, //1
+  B11100110, //2
+  B10110110, //3
+  B10010101, //4
+  B10110011, //5
+  B11110011, //6
+  B00010110, //7
+  B11110111, //8
+  B10010111, //9
+  B11010111, //A
+  B11110001, //B
+  B01100011, //C
+  B11110100, //D
+  B11100011, //E
+  B11000011, //F
+  };
+  
+// define yourself some debounce constants in ms
+#define debounce 300 //normal debounce duration
+#define short_debounce 50 //short debounce duration
+
+// declare the state variable of the 7 segment display
+unsigned char ledState; 
+//latch
+#define latch_bit     B00000010
+#define latch_high    PORTB |= latch_bit
+#define latch_low     PORTB &= ~latch_bit
+//data
+#define data_bit      B00000001
+#define data_high     PORTB |= data_bit
+#define data_low      PORTB &= ~data_bit
+//clock
+#define clock_bit     B00000100
+#define clock_high    PORTB |= clock_bit
+#define clock_low     PORTB &= ~clock_bit      
+// module0 is my 0 to F button counter
+// module0 variables
+
+bool init_module0_clock;
+     
+// module1 is my button 1 debouncer and driver
+// module1 variables    
+bool init_module1_clock;
+     
+// module2 is my traffic light controller
+// module2 variables    
+bool init_module2_clock;
+
+// check A.8.4 Enumerations on page 175 in Kernighan
+// Ritchie for a definition of priority_t as a type
+// and the variables module2_priority, module2_new_priority
+// check also page 38 in "The C" book for an example
+enum priority_t { EQUAL, SET1, SET2 };
+priority_t module2_priority, module2_new_priority;
+//module2_priority = EQUAL;
+//if(module2_priority == SET1);
+// module3 is my MPU-6050 driver
+// module3 variables    
+bool init_module3_clock;
+
+// module4 is my scheduler
+// module4 variables    
+bool init_module4_clock;
+
+// module5 is the second button driver and debouncer
+// module5 variables
+bool init_module5_clock;
+
+// module6 is the heart beat module
+//module6 variables    
+bool init_module6_clock;
+
+// definition for the type of the button state variables
+enum button_t { notPRESSED, partialPRESS, normalPRESS, heldPRESS,
+                preDblClick, partialDblClick, DblClick, afterDblClick };
+button_t B1_state; // button B1 state variable
+button_t B2_state; // button B2 state variable
+
+#define notPRESSED 0
+#define normalPRESS 1
+#define partialPRESS 2
+
+#define B1_BIT B00001000
+#define B1_PRESSED      !(PINB & B1_BIT)
+#define B1_RELEASED     !B1_PRESSED
+//#define B1_partialPRESS !B1_normalPRESS
+
+#define B2_BIT B00010000
+#define B2_PRESSED      !(PINB & B2_BIT)
+#define B2_RELEASED     !B2_PRESSED
+//#define B2_partialPRESS !B2_normalPRESS
+
+void setup() {
+  Serial.begin(9600);
+  
+  // DATA, CLOCK and LATCH pin for the shift register
+  // to be configured as outputs using bare-metal approach
+  DDRB |= B00000111;
+  
+  // set clock and latch pin to LOW using bare-metal approach
+  //PORTB &= ~latch_bit;
+  //PORTB &= ~clock_bit;
+  latch_low;
+  clock_low;
+  
+  // set the state variable for your
+  // 7 seg display to "all_segments_off"
+  ledState = B00000000;
+
+  // button 1 and 2 pins to be configured as INPUT_PULLUP
+  // again using a bare metal approach.
+ DDRB &= ~B1_BIT; // pullup for s1
+ PORTB |= B1_BIT; 
+
+ DDRB &= ~B2_BIT; //pullup for s2
+ PORTB |= B2_BIT; 
+  // set the state variables for both
+  // buttons to "not pressed"
+  B1_state=notPRESSED;
+  B2_state=notPRESSED;
+  // all traffic light led pins to be configured
+  // as outputs and to be turned off using bare-metal.
+  DDRD |= B11111100; 
+  // initialise the clocks on all modules
+init_module0_clock = true;
+init_module1_clock = true;
+init_module2_clock = true;
+init_module3_clock = true;
+init_module4_clock = true;
+init_module5_clock = true;
+init_module6_clock = true;
+
+  // initialise the I2C bus. wake up the MPU-6050
+Wire.write(0);//settozero(wakesuptheMPU-6050)
+
+}
+
+
+void loop() {
+
+  { // module 0 - 7-segment counter
+    static unsigned long module_time, module_delay;
+    static bool module_doStep;
+    static unsigned char state; // state variable for module 0
+    static unsigned char count;
+    
+    if (init_module0_clock) {
+      module_delay = 20;
+      module_time=millis();
+      module_doStep=false;
+      init_module0_clock=false;
+      state=count = 0;
+    }
+    else {
+      unsigned long m;
+      m=millis();
+      if (((long)(m - module_time)) > module_delay) {
+        module_time = m; module_doStep = true;
+      }
+      else module_doStep = false;
+    }
+
+    // The following code assumes you have put the dot point on the
+    // most significant bit. If not, either:-
+    // - rewire your board, or
+    // - change in software
+    if (module_doStep) {
+       unsigned char msb = 0b00001000 & ledState; // what did I do this for?
+       switch(count){
+          //case 0:ledState = msb | LED_ZERO; break;
+          //case 0:ledState = msb | LED_ONE; break;
+          case 0:ledState = msb | numbers[0]; break;
+          case 1:ledState = msb | numbers[1]; break;
+          case 2:ledState = msb | numbers[2]; break;
+          case 3:ledState = msb | numbers[3]; break;
+          case 4:ledState = msb | numbers[4]; break;
+          case 5:ledState = msb | numbers[5]; break;
+          case 6:ledState = msb | numbers[6]; break;
+          case 7:ledState = msb | numbers[7]; break;
+          case 8:ledState = msb | numbers[8]; break;
+          case 9:ledState = msb | numbers[9]; break;
+          case 10:ledState = msb | numbers[10]; break;
+          case 11:ledState = msb | numbers[11]; break;
+          case 12:ledState = msb | numbers[12]; break;
+          case 13:ledState = msb | numbers[13]; break;
+          case 14:ledState = msb | numbers[14]; break;
+          case 15:ledState = msb | numbers[15]; break;
+          case 16:ledState = msb | numbers[16]; break;
+          // ... etc
+          //case 15:ledState = msb | numbers[15]; break;
+          default:count = 0; ledState = msb | LEDS_OFF;
+       }
+       switch (state) {
+        case 0: 
+          if (B1_state==normalPRESS) {
+            state=1;
+            count=(count+1)%16;
+          }
+          break;
+        case 1:
+          if (B1_state==notPRESSED) {
+            state=0;
+          }
+          break;
+        default: state=0;
+       }
+        
+    }
+  }
+
+
+  { // module 1 - Switch 1 debounce
+    static unsigned long module_time, module_delay;
+    static unsigned long debounce_count;
+    static bool module_doStep;
+    static unsigned char state; // state variable for module 1
+    
+    if (init_module1_clock) {
+      module_delay = 17;
+      module_time=millis();
+      module_doStep=false;
+      init_module1_clock=false;
+      state=0;
+    }
+    else {
+      unsigned long m;
+      m=millis();
+      if (((long)(m - module_time)) > module_delay) {
+        module_time = m; module_doStep = true;
+      }
+      else module_doStep = false;
+    }
+
+    if (module_doStep) {
+      switch(state){
+          case 0: 
+            B1_state=notPRESSED;
+            debounce_count = module_time;
+            if (B1_RELEASED) state = 0;
+            else state = 1;
+            break;
+          case 1: 
+            B1_state=partialPRESS;
+            if (B1_RELEASED) state = 0;
+            else if ((long)(millis()-debounce_count) >= debounce) state = 2;
+            else state = 1;
+            break;
+          case 2: 
+            B1_state=normalPRESS;
+            if (B1_RELEASED) state = 0;
+            else if ((long)(millis()-debounce_count) >= 1000) state = 2;
+            else state = 2;
+            break;
+          // ... etc
+          default: state = 0; break;
+        }
+    }
+  }
+
+  { // module 2 - traffic lights
+    static unsigned long module_time, module_delay;
+    static bool module_doStep;
+    static unsigned char state; // state variable for module 2
+    
+    if (init_module2_clock) {
+      module_delay = 500;
+      module_time=millis();
+      module_doStep=false;
+      init_module2_clock=false;
+      state= 10;
+    }
+    else {
+      unsigned long m;
+      m=millis();
+      if (((long)(m - module_time)) > module_delay) {
+        module_time = m; module_doStep = true;
+      }
+      else module_doStep = false;
+    }
+
+    if (module_doStep) {
+      switch(state){
+          case 10: // attention
+          PORTD = (LED_2 | LED_5)  | (B00000011 & PIND);
+          module_delay = 3000;
+          state = 0;
+            //... etc
+            break;
+          case 0: // =red ||red
+            //... etc
+            PORTD = (LED_1 | LED_4)  | (B00000011 & PIND);
+          module_delay = 1000;
+          state = 1;
+            break;
+          case 1: // =red, yellow || red
+          PORTD = (LED_1 | LED_2 | LED_4 )  | (B00000011 & PIND);
+          module_delay = 1000;
+          state = 2;
+            //... etc
+            break;
+          case 2: // =green || red
+           PORTD = (LED_3 | LED_4  )  | (B00000011 & PIND);
+          module_delay = 5000;
+          state = 3;       
+            //... etc
+            break;
+          case 3: // =yellow || red
+           PORTD = (LED_2 | LED_4 )  | (B00000011 & PIND);
+          module_delay = 1000;
+          state = 4;
+            //... etc
+            break;
+          case 4: // =red ||red
+           PORTD = (LED_1 | LED_4 )  | (B00000011 & PIND);
+          module_delay = 1000;
+          state = 5;
+            //... etc
+            break;
+          case 5: // =red || red, yellow
+           PORTD = (LED_1 | LED_4 | LED_5 )  | (B00000011 & PIND);
+          module_delay = 1000;
+          state = 6;
+            //... etc
+            break;
+          case 6: // =red || green
+           PORTD = (LED_1 | LED_6 )  | (B00000011 & PIND);
+          module_delay = 5000;
+          state = 7;
+            //... etc
+            break;
+          case 7: // =red || yellow
+           PORTD = (LED_1 | LED_5)  | (B00000011 & PIND);
+          module_delay = 1000;
+          state = 0;
+            //... etc
+            break;
+          default:state = 10;break;
+        }
+    }
+  }
+
+#ifdef ACCELEROMETER
+  { // module 3 - accelerometer
+    static unsigned long module_time, module_delay;
+    static bool module_doStep;
+    static unsigned char state; // state variable for module 2
+    static int16_t AcX,AcY,AcZ; // accelerometer variables 
+    static int16_t oldAcX,oldAcY,oldAcZ; // accelerometer variables
+    static int16_t newAcX,newAcY,newAcZ; // accelerometer variables
+    
+    if (init_module3_clock) {
+      module_delay = 333; // sample every 333ms as per spec
+      module_time=millis();
+      module_doStep=false;
+      init_module3_clock=false;
+      state=0;
+      Wire.beginTransmission(MPU_addr);
+      Wire.write(0x3B);  // starting with register 0x3B (ACCEL_XOUT_H)
+      Wire.endTransmission(false);
+      Wire.requestFrom(MPU_addr,6,true);  // request a total of 6 registers
+      oldAcX=Wire.read()<<8|Wire.read();  // 0x3B (ACCEL_XOUT_H) & 0x3C (ACCEL_XOUT_L)     
+      oldAcY=Wire.read()<<8|Wire.read();  // 0x3D (ACCEL_YOUT_H) & 0x3E (ACCEL_YOUT_L)
+      oldAcZ=Wire.read()<<8|Wire.read();  // 0x3F (ACCEL_ZOUT_H) & 0x40 (ACCEL_ZOUT_L)
+    }
+    else {
+      unsigned long m;
+      m=millis();
+      if (((long)(m - module_time)) > module_delay) {
+        module_time = m; module_doStep = true;
+      }
+      else module_doStep = false;
+    }
+
+    if (module_doStep) {
+
+      Wire.beginTransmission(MPU_addr);
+      Wire.write(0x3B);  // starting with register 0x3B (ACCEL_XOUT_H)
+      Wire.endTransmission(false);
+      Wire.requestFrom(MPU_addr,6,true);  // request a total of 6 registers
+      newAcX=Wire.read()<<8|Wire.read();  // 0x3B (ACCEL_XOUT_H) & 0x3C (ACCEL_XOUT_L)     
+      newAcY=Wire.read()<<8|Wire.read();  // 0x3D (ACCEL_YOUT_H) & 0x3E (ACCEL_YOUT_L)
+      newAcZ=Wire.read()<<8|Wire.read();  // 0x3F (ACCEL_ZOUT_H) & 0x40 (ACCEL_ZOUT_L)
+      
+      // calculate orientation here
+      
+      unsigned char msb = 0b10000000 & ledState;
+      switch(state){
+          case 0:ledState = msb | LED_F; /* set traffic priority here */ break; // flat face up
+          case 1:ledState = msb | LED_b; /* set traffic priority here */ break; // flat face down
+          case 2:ledState = msb | LED_U; /* set traffic priority here */ break; // landscape upside down
+          case 3:ledState = msb | LED_L; /* set traffic priority here */ break; // landscape
+          case 4:ledState = msb | LED_r; /* set traffic priority here */ break; // portrate right
+          case 5:ledState = msb | LED_l; /* set traffic priority here */ break; // portrate left
+          default:state = 0; ledState = msb | LED_OFF;
+       }
+    }
+  }
+#endif
+
+  { // module 4 - MAIN SCHEDULER
+    static unsigned long module_time, module_delay;
+    static bool module_doStep;
+    static unsigned char state; // state variable for module 4
+
+{
+  static unsigned char old;
+  if(old!=state) {
+    Serial.print("scheduler state = "); Serial.println(state, DEC);
+    old=state;
+  }
+}
+    if (init_module4_clock) {
+      module_delay = 20;
+      module_time=millis();
+      module_doStep=false;
+      init_module4_clock=false;
+      state=0;
+    }
+    else {
+      unsigned long m;
+      m=millis();
+      if (((long)(m - module_time)) > module_delay) {
+        module_time = m; module_doStep = true;
+      }
+      else module_doStep = false;
+    }
+
+    if (module_doStep) {
+      switch (state) {
+        case 0: 
+          init_module2_clock = false; // run traffic light controller
+          init_module0_clock = true; // stop button count
+          ledState = (((unsigned char) (B00001000 & ledState))) | LED_t;
+          init_module3_clock = true; // keep resetting the gyro
+          if (B2_state==notPRESSED) state = 1;
+          break;
+       
+        case 1: 
+          init_module2_clock = false; // run traffic light controller
+          init_module0_clock = true; // stop button count
+          ledState = (((unsigned char) (B00001000 & ledState))) | LED_t;
+          init_module3_clock = true; // keep resetting the gyro
+          if (B2_state==normalPRESS) state = 2; // button count only mode
+          
+          break;
+
+        case 2: 
+          init_module2_clock = true; // run traffic light controller
+          init_module0_clock = false; // stop button count
+          init_module3_clock = true; // keep resetting the gyro
+          if (B2_state==notPRESSED)          
+          state = 3;
+          
+          break;
+        case 3: 
+          init_module2_clock = true; // run traffic light controller
+          init_module0_clock = false; // stop button count
+          init_module3_clock = true; // keep resetting the gyro
+          if (B2_state==normalPRESS) state = 4; // button count only mode
+          break;
+           
+       
+        case 4: 
+          init_module2_clock = true; // run traffic light controller
+          init_module0_clock = false; // stop button count
+          init_module3_clock = true; // keep resetting the gyro
+          if (B2_state==notPRESSED) state = 5; // button count only mode
+          break;
+
+ 
+        case 5: 
+          init_module2_clock = false; // run traffic light controller
+          init_module0_clock = false; // stop button count
+          init_module3_clock = true; // keep resetting the gyro
+          if (B2_state==normalPRESS) state = 0; // button count only mode
+          break;
+          
+        // ... etc define here your modes
+        
+        default: state = 0;
+      }
+    }
+  }
+ 
+  
+  { // module 5 - Switch 2 debounce
+    static unsigned long module_time, module_delay;
+    static unsigned long debounce_count;
+    static bool module_doStep;
+    static unsigned char state; // state variable for module 1
+
+    if (init_module5_clock) {
+      module_delay = 17;
+      module_time=millis();
+      module_doStep=false;
+      init_module5_clock=false;
+      state=0;
+    }
+    else {
+      unsigned long m;
+      m=millis();
+      if (((long)(m - module_time)) > module_delay) {
+        module_time = m; module_doStep = true;
+      }
+      else module_doStep = false;
+    }
+
+    if (module_doStep) {
+      switch(state){
+          case 0: 
+            B2_state=notPRESSED;
+            debounce_count = module_time;
+            if (B2_RELEASED) state = 0;
+            else state = 1;
+            break;
+          case 1: 
+            B2_state=partialPRESS;
+            if (B2_RELEASED) state = 0;
+            else if ((long)(millis()-debounce_count) >= debounce) state = 2;
+            else state = 1;
+            break;
+          case 2: 
+            B2_state=normalPRESS;
+            if (B2_RELEASED) state = 0;
+            else if ((long)(millis()-debounce_count) >= 1000) state = 2;
+            else state = 2;
+            break;
+          // ... etc
+          default: state = 0; break;
+        }
+    }
+  }
+
+
+  { // module 6 - Heartbeat
+    static unsigned long module_time, module_delay;
+    static bool module_doStep;
+    static unsigned char state; // state variable for module 1
+
+    if (init_module6_clock) {
+      module_delay = 500;
+      module_time=millis();
+      module_doStep=false;
+      init_module6_clock=false;
+      state=0;
+    }
+    else {
+      unsigned long m;
+      m=millis();
+      if (((long)(m - module_time)) > module_delay) {
+        module_time = m; module_doStep = true;
+      }
+      else module_doStep = false;
+    }
+
+    if (module_doStep) {
+       switch (state) {
+        case 0: 
+          // single line of code here
+          ledState |= B00001000;
+          state = 1;
+          break;
+        case 1:
+          // single line of code here
+          ledState &= ~B00001000;
+          state=0;
+          break;
+        default: state=0;
+       } 
+    }
+  }
+
+  shiftByteMSF(ledState); 
+}
+
+void shiftBit(bool data) {
+}
+
+void toggleClock() {
+  clock_high;
+  clock_low;
+}
+
+void toggleLatch() {
+  latch_high;
+  latch_low;
+}
+
+void shiftByteMSF(unsigned char b) {
+    latch_low; // latchPin LOW 
+ 
+    for (int k=0; k <= 7; k++)
+    {
+ 
+      if ( b & (1 << k) )
+      {
+        data_high; // turn On
+      }
+      else
+      {
+        data_low; // turn Off
+      }
+      toggleClock();
+    }
+
+    toggleLatch();
+}

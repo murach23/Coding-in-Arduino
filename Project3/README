@@ -1,0 +1,5 @@
+The keypad project has the following functionalities:
+1. After entering correct password on the Keypad, the user get access to control
+stepper motor. 
+2. To control the direction of the motor, the potentiometer must be used. 
+The motor can go both ways.
